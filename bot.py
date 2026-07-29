@@ -42,8 +42,8 @@ TASKS = [
     {
         "id": "-1003715217878",
         "name": "Channel 1",
-        "channel": "https://t.me/+bjpnPVb-M1cxY2Vl",   # used for get_chat_member check
-        "invite_link": "https://t.me/+bjpnPVb-M1cxY2Vl",
+        "channel": "https://t.me/echovault01",   # used for get_chat_member check
+        "invite_link": "https://t.me/echovault01",
         "reward": 5,
     },
     # Add more tasks below, e.g.:
