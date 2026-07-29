@@ -31,29 +31,22 @@ from telebot import types
 # CONFIG
 # =========================================================================
 
-BOT_TOKEN = "8877167205:AAFPQp5-kvXX7ZPxX2B2TdkAybgbmjmfvCs"          # <-- Get this from @BotFather
+BOT_TOKEN = "8877167205:AAFPQp5-kvXX7ZPxX2B2TdkAybgbmjmfvCs"
 ADMIN_IDS = [7063394683]                     # <-- Your Telegram numeric user ID(s)
 
 DB_PATH = "bot_database.db"
 
-# Tasks: each task = a channel the user must join to earn a reward.
-# You can add more tasks here (channel username/id, display name, invite link, reward).
-TASKS = [
+# Tasks are now stored in the database (table: tasks) so the admin can add,
+# view, and remove them from the Admin Panel without editing code.
+# The list below is only used to SEED the database the first time the bot runs
+# (i.e. if the tasks table is empty). After that, everything is DB-driven.
+SEED_TASKS = [
     {
-        "id": "-1003715217878",
-        "name": "Channel 1",
-        "channel": "https://t.me/echovault01",   # used for get_chat_member check
+        "name": "Join Our Main Channel",
+        "channel": "@echovault01",
         "invite_link": "https://t.me/echovault01",
         "reward": 5,
     },
-    # Add more tasks below, e.g.:
-    # {
-    #     "id": "task_channel_2",
-    #     "name": "Join Announcements Channel",
-    #     "channel": "@your_second_channel",
-    #     "invite_link": "https://t.me/your_second_channel",
-    #     "reward": 15,
-    # },
 ]
 
 REFERRAL_BONUS_REFERRER = 10   # credits given to the person who invited
@@ -123,7 +116,29 @@ def init_db():
             )
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                task_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                invite_link TEXT NOT NULL,
+                reward INTEGER NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+
         conn.commit()
+
+        # Seed default tasks only the very first time (table empty)
+        cur.execute("SELECT COUNT(*) FROM tasks")
+        if cur.fetchone()[0] == 0:
+            for t in SEED_TASKS:
+                cur.execute(
+                    "INSERT INTO tasks (name, channel, invite_link, reward, active) VALUES (?, ?, ?, ?, 1)",
+                    (t["name"], t["channel"], t["invite_link"], t["reward"]),
+                )
+            conn.commit()
+
         conn.close()
 
 
@@ -143,6 +158,11 @@ ACTION_ADD_ITEM_NAME = "add_item_name"
 ACTION_ADD_ITEM_PRICE = "add_item_price"
 ACTION_ADD_ITEM_LINK = "add_item_link"
 ACTION_BROADCAST_MSG = "broadcast_msg"
+ACTION_ADD_TASK_NAME = "add_task_name"
+ACTION_ADD_TASK_CHANNEL = "add_task_channel"
+ACTION_ADD_TASK_LINK = "add_task_link"
+ACTION_ADD_TASK_REWARD = "add_task_reward"
+ACTION_REMOVE_TASK_ID = "remove_task_id"
 
 # =========================================================================
 # HELPER FUNCTIONS — USERS / CREDITS
@@ -294,11 +314,62 @@ def check_user_joined_channel(user_id: int, channel: str) -> bool:
         return False
 
 
-def get_task_by_id(task_id: str):
-    for t in TASKS:
-        if t["id"] == task_id:
-            return t
-    return None
+def get_active_tasks():
+    with db_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT task_id, name, channel, invite_link, reward FROM tasks WHERE active = 1")
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+
+
+def get_task_by_id(task_id):
+    """task_id may arrive as a string (from callback_data) or int."""
+    with db_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT task_id, name, channel, invite_link, reward FROM tasks WHERE task_id = ? AND active = 1",
+            (int(task_id),),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            "id": str(row[0]),
+            "name": row[1],
+            "channel": row[2],
+            "invite_link": row[3],
+            "reward": row[4],
+        }
+
+
+def add_task(name: str, channel: str, invite_link: str, reward: int):
+    with db_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO tasks (name, channel, invite_link, reward, active) VALUES (?, ?, ?, ?, 1)",
+            (name, channel, invite_link, reward),
+        )
+        conn.commit()
+        task_id = cur.lastrowid
+        conn.close()
+        return task_id
+
+
+def remove_task(task_id: int):
+    """Soft-delete: mark inactive so history (completed_tasks) stays valid."""
+    with db_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE tasks SET active = 0 WHERE task_id = ?", (task_id,))
+        conn.commit()
+        changed = cur.rowcount > 0
+        conn.close()
+        return changed
 
 # =========================================================================
 # HELPER FUNCTIONS — STORE
@@ -361,6 +432,7 @@ def main_menu_keyboard():
         types.InlineKeyboardButton("📋 Tasks", callback_data="menu_tasks"),
         types.InlineKeyboardButton("💰 Balance", callback_data="menu_balance"),
         types.InlineKeyboardButton("🛒 Store", callback_data="menu_store"),
+        types.InlineKeyboardButton("🔗 Refer & Earn", callback_data="menu_referral"),
     )
     return kb
 
@@ -373,8 +445,8 @@ def back_to_menu_keyboard():
 
 def tasks_keyboard():
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for task in TASKS:
-        kb.add(types.InlineKeyboardButton(f"➡️ {task['name']}", callback_data=f"view_task_{task['id']}"))
+    for task_id, name, _channel, _invite_link, _reward in get_active_tasks():
+        kb.add(types.InlineKeyboardButton(f"➡️ {name}", callback_data=f"view_task_{task_id}"))
     kb.add(types.InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_main"))
     return kb
 
@@ -404,6 +476,8 @@ def admin_panel_keyboard():
         types.InlineKeyboardButton("➕ Add Credits to User", callback_data="admin_add_credits"),
         types.InlineKeyboardButton("🔍 Check User Balance", callback_data="admin_check_balance"),
         types.InlineKeyboardButton("🛍️ Add Store Item", callback_data="admin_add_item"),
+        types.InlineKeyboardButton("📋 Add New Task", callback_data="admin_add_task"),
+        types.InlineKeyboardButton("🗑️ Remove Task", callback_data="admin_remove_task"),
         types.InlineKeyboardButton("📢 Broadcast Message", callback_data="admin_broadcast"),
     )
     return kb
@@ -514,9 +588,28 @@ def cb_menu_balance(call):
     bot.answer_callback_query(call.id)
 
 
+@bot.callback_query_handler(func=lambda call: call.data == "menu_referral")
+def cb_menu_referral(call):
+    user_id = call.from_user.id
+    if not user_exists(user_id):
+        register_user(user_id, call.from_user.username or call.from_user.first_name)
+    bot_username = bot.get_me().username
+    link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    bot.edit_message_text(
+        "🔗 <b>Your Referral Link</b>\n\n"
+        f"{link}\n\n"
+        f"Share this with friends. You earn <b>{REFERRAL_BONUS_REFERRER}</b> credits per referral, "
+        f"and they get <b>{REFERRAL_BONUS_REFEREE}</b> credits for joining!",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=back_to_menu_keyboard(),
+    )
+    bot.answer_callback_query(call.id)
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "menu_tasks")
 def cb_menu_tasks(call):
-    if not TASKS:
+    if not get_active_tasks():
         bot.edit_message_text(
             "📋 <b>Tasks</b>\n\nNo tasks are available right now. Check back later!",
             call.message.chat.id,
@@ -692,6 +785,22 @@ def cb_admin_actions(call):
         admin_state[user_id] = {"action": ACTION_ADD_ITEM_NAME, "data": {}}
         bot.send_message(call.message.chat.id, "✏️ Send the <b>item name</b>:")
 
+    elif action == "admin_add_task":
+        admin_state[user_id] = {"action": ACTION_ADD_TASK_NAME, "data": {}}
+        bot.send_message(call.message.chat.id, "✏️ Send the <b>task name</b> (e.g. \"Join Announcements\"):")
+
+    elif action == "admin_remove_task":
+        tasks = get_active_tasks()
+        if not tasks:
+            bot.send_message(call.message.chat.id, "There are no active tasks to remove.")
+        else:
+            listing = "\n".join(f"• ID {t[0]} — {t[1]}" for t in tasks)
+            admin_state[user_id] = {"action": ACTION_REMOVE_TASK_ID, "data": {}}
+            bot.send_message(
+                call.message.chat.id,
+                f"🗑️ <b>Current Tasks</b>\n\n{listing}\n\nSend the <b>Task ID</b> to remove:",
+            )
+
     elif action == "admin_broadcast":
         admin_state[user_id] = {"action": ACTION_BROADCAST_MSG, "data": {}}
         bot.send_message(call.message.chat.id, "✏️ Send the <b>message</b> you want to broadcast to all users:")
@@ -794,6 +903,65 @@ def handle_admin_input(message):
             f"✅ Store item added!\n\n"
             f"ID: {item_id}\nName: {data['name']}\nPrice: {data['price']} credits\nLink: {text}",
         )
+        return
+
+    # ---------------- Add Task ----------------
+    if action == ACTION_ADD_TASK_NAME:
+        if not text:
+            bot.send_message(message.chat.id, "❌ Task name cannot be empty. Try again:")
+            return
+        data["name"] = text
+        state["action"] = ACTION_ADD_TASK_CHANNEL
+        bot.send_message(message.chat.id, "✏️ Now send the <b>channel username</b> (e.g. @yourchannel):")
+        return
+
+    if action == ACTION_ADD_TASK_CHANNEL:
+        if not text.startswith("@"):
+            bot.send_message(message.chat.id, "❌ Invalid channel username. It must start with @")
+            return
+        data["channel"] = text
+        state["action"] = ACTION_ADD_TASK_LINK
+        bot.send_message(message.chat.id, "✏️ Now send the <b>invite link</b> (e.g. https://t.me/yourchannel):")
+        return
+
+    if action == ACTION_ADD_TASK_LINK:
+        if not text.startswith("http://") and not text.startswith("https://"):
+            bot.send_message(message.chat.id, "❌ Invalid link. It must start with http:// or https://")
+            return
+        data["invite_link"] = text
+        state["action"] = ACTION_ADD_TASK_REWARD
+        bot.send_message(message.chat.id, "✏️ Now send the <b>reward</b> (credits) for completing this task:")
+        return
+
+    if action == ACTION_ADD_TASK_REWARD:
+        if not text.isdigit() or int(text) <= 0:
+            bot.send_message(message.chat.id, "❌ Invalid reward. Please send a positive whole number.")
+            return
+        reward = int(text)
+        task_id = add_task(data["name"], data["channel"], data["invite_link"], reward)
+        admin_state.pop(user_id, None)
+        bot.send_message(
+            message.chat.id,
+            f"✅ Task added!\n\n"
+            f"ID: {task_id}\nName: {data['name']}\nChannel: {data['channel']}\n"
+            f"Link: {data['invite_link']}\nReward: {reward} credits\n\n"
+            f"⚠️ Reminder: make sure this bot is an <b>admin</b> in {data['channel']}, "
+            f"or membership verification will fail.",
+        )
+        return
+
+    # ---------------- Remove Task ----------------
+    if action == ACTION_REMOVE_TASK_ID:
+        if not text.isdigit():
+            bot.send_message(message.chat.id, "❌ Invalid Task ID. Please send numbers only.")
+            return
+        task_id = int(text)
+        admin_state.pop(user_id, None)
+        removed = remove_task(task_id)
+        if removed:
+            bot.send_message(message.chat.id, f"✅ Task {task_id} removed.")
+        else:
+            bot.send_message(message.chat.id, f"❌ Task {task_id} was not found or already removed.")
         return
 
     # ---------------- Broadcast ----------------
