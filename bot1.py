@@ -163,6 +163,7 @@ ACTION_ADD_TASK_CHANNEL = "add_task_channel"
 ACTION_ADD_TASK_LINK = "add_task_link"
 ACTION_ADD_TASK_REWARD = "add_task_reward"
 ACTION_REMOVE_TASK_ID = "remove_task_id"
+ACTION_REMOVE_ITEM_ID = "remove_item_id"
 
 # =========================================================================
 # HELPER FUNCTIONS — USERS / CREDITS
@@ -410,6 +411,18 @@ def add_store_item(name: str, price: int, link: str):
         return item_id
 
 
+def remove_store_item(item_id: int):
+    """Soft-delete: mark inactive so past purchase history stays valid."""
+    with db_lock:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE store_items SET active = 0 WHERE item_id = ?", (item_id,))
+        conn.commit()
+        changed = cur.rowcount > 0
+        conn.close()
+        return changed
+        
+
 def record_purchase(user_id: int, item_id: int):
     with db_lock:
         conn = get_conn()
@@ -476,6 +489,7 @@ def admin_panel_keyboard():
         types.InlineKeyboardButton("➕ Add Credits to User", callback_data="admin_add_credits"),
         types.InlineKeyboardButton("🔍 Check User Balance", callback_data="admin_check_balance"),
         types.InlineKeyboardButton("🛍️ Add Store Item", callback_data="admin_add_item"),
+        types.InlineKeyboardButton("🗑️ Remove Store Item", callback_data="admin_remove_item"),
         types.InlineKeyboardButton("📋 Add New Task", callback_data="admin_add_task"),
         types.InlineKeyboardButton("🗑️ Remove Task", callback_data="admin_remove_task"),
         types.InlineKeyboardButton("📢 Broadcast Message", callback_data="admin_broadcast"),
@@ -785,6 +799,18 @@ def cb_admin_actions(call):
         admin_state[user_id] = {"action": ACTION_ADD_ITEM_NAME, "data": {}}
         bot.send_message(call.message.chat.id, "✏️ Send the <b>item name</b>:")
 
+    elif action == "admin_remove_item":
+    items = get_active_store_items()
+    if not items:
+        bot.send_message(call.message.chat.id, "There are no active store items to remove.")
+    else:
+        listing = "\n".join(f"• ID {i[0]} — {i[1]} ({i[2]} credits)" for i in items)
+        admin_state[user_id] = {"action": ACTION_REMOVE_ITEM_ID, "data": {}}
+        bot.send_message(
+            call.message.chat.id,
+            f"🗑️ <b>Current Store Items</b>\n\n{listing}\n\nSend the <b>Item ID</b> to remove:",
+        )
+
     elif action == "admin_add_task":
         admin_state[user_id] = {"action": ACTION_ADD_TASK_NAME, "data": {}}
         bot.send_message(call.message.chat.id, "✏️ Send the <b>task name</b> (e.g. \"Join Announcements\"):")
@@ -882,6 +908,20 @@ def handle_admin_input(message):
         state["action"] = ACTION_ADD_ITEM_PRICE
         bot.send_message(message.chat.id, "✏️ Now send the <b>price</b> (in credits):")
         return
+
+# ---------------- Remove Store Item ----------------
+if action == ACTION_REMOVE_ITEM_ID:
+    if not text.isdigit():
+        bot.send_message(message.chat.id, "❌ Invalid Item ID. Please send numbers only.")
+        return
+    item_id = int(text)
+    admin_state.pop(user_id, None)
+    removed = remove_store_item(item_id)
+    if removed:
+        bot.send_message(message.chat.id, f"✅ Store item {item_id} removed.")
+    else:
+        bot.send_message(message.chat.id, f"❌ Item {item_id} was not found or already removed.")
+    return
 
     if action == ACTION_ADD_ITEM_PRICE:
         if not text.isdigit() or int(text) <= 0:
